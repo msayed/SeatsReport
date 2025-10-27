@@ -39,6 +39,7 @@ builder.Services.AddSwaggerGen(o =>
 });
 
 builder.Services.AddScoped<SeatsService>();
+builder.Services.AddScoped<AuthService>();
 
 // CORS (dev)
 builder.Services.AddCors(o => o.AddDefaultPolicy(p => p
@@ -95,14 +96,18 @@ app.UseAuthorization();
 
 
 // ===== Auth endpoint =====
-app.MapPost("/api/auth/token", ([FromBody] LoginRequest req, IConfiguration cfg) =>
+app.MapPost("/api/auth/token", async ([FromBody] LoginRequest req, AuthService authService, IConfiguration cfg) =>
 {
-    var users = cfg.GetSection("Users").Get<List<LoginRequest>>() ?? new();
-    var user = users.FirstOrDefault(u =>
-        string.Equals(u.Username, req.Username, StringComparison.OrdinalIgnoreCase) &&
-        u.Password == req.Password);
+    if (string.IsNullOrWhiteSpace(req.Username) || string.IsNullOrWhiteSpace(req.Password))
+    {
+        return Results.BadRequest(new { error = "Username and password are required." });
+    }
 
-    if (user is null) return Results.Unauthorized();
+    var user = await authService.ValidateUserAsync(req.Username, req.Password);
+    if (user is null)
+    {
+        return Results.Unauthorized();
+    }
 
     var jwtSection = cfg.GetSection("Jwt");
     var issuer = jwtSection["Issuer"]!;
@@ -112,10 +117,15 @@ app.MapPost("/api/auth/token", ([FromBody] LoginRequest req, IConfiguration cfg)
 
     var claims = new List<Claim>
     {
-        new Claim(JwtRegisteredClaimNames.Sub, req.Username),
-        new Claim(ClaimTypes.Name, req.Username),
-        new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
+        new Claim(JwtRegisteredClaimNames.Sub, user.Username),
+        new Claim(ClaimTypes.Name, user.Username),
+        new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
     };
+
+    if (!string.IsNullOrWhiteSpace(user.FullName))
+    {
+        claims.Add(new Claim("full_name", user.FullName));
+    }
 
     var token = new JwtSecurityToken(
         issuer: issuer,
@@ -125,7 +135,7 @@ app.MapPost("/api/auth/token", ([FromBody] LoginRequest req, IConfiguration cfg)
         signingCredentials: creds);
 
     var jwt = new JwtSecurityTokenHandler().WriteToken(token);
-    return Results.Ok(new { access_token = jwt, token_type = "Bearer" });
+    return Results.Ok(new { access_token = jwt, token_type = "Bearer", username = user.Username, fullname = user.FullName });
 })
 .WithName("GetToken")
 .WithTags("Auth");
